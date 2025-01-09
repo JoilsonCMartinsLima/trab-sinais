@@ -1,174 +1,137 @@
 import os
+import pywt
 import numpy as np
-from scipy.signal import butter, lfilter, savgol_filter
-from scipy.fftpack import fft
-import matplotlib.pyplot as plt
-import PySimpleGUI as sg
-import simpleaudio as sa
-import wave
+import scipy.io.wavfile as wav
+import pygame
+import tkinter as tk
+from tkinter import filedialog, messagebox
 
-# Função para carregar o áudio
+# Função para carregar e normalizar o áudio
 
-def load_audio(audio_path):
-    with wave.open(audio_path, 'rb') as wav_file:
-        sample_rate = wav_file.getframerate()
-        n_samples = wav_file.getnframes()
-        signal = np.frombuffer(wav_file.readframes(n_samples), dtype=np.int16).astype(np.float32) / (2**15)
-    return signal, sample_rate
 
-# Função para reproduzir o áudio
+def load_audio(file_path):
+    rate, audio = wav.read(file_path)
 
-def play_signal(signal, sample_rate):
-    audio = (signal * (2**15 - 1)).astype(np.int16)
-    play_obj = sa.play_buffer(audio, num_channels=1, bytes_per_sample=2, sample_rate=sample_rate)
-    play_obj.wait_done()
+    if len(audio.shape) > 1:
+        audio = audio[:, 0]  # Converte para mono, se necessário
 
-# Função para exibir o gráfico do sinal
+    audio = audio / np.max(np.abs(audio))  # Normaliza
+    return rate, audio
 
-def plot_signal(time, signal, title="Sinal"):
-    plt.figure(figsize=(10, 5))
-    plt.plot(time, signal)
-    plt.title(title)
-    plt.xlabel("Tempo (s)")
-    plt.ylabel("Amplitude")
-    plt.grid()
-    plt.show()
+# Função para aplicar a transformada de wavelet e filtrar o áudio com ajustes
 
-# Filtros básicos
 
-def butter_filter(data, cutoff, fs, btype, order=5):
-    nyquist = 0.5 * fs
-    normal_cutoff = cutoff / nyquist
-    b, a = butter(order, normal_cutoff, btype=btype, analog=False)
-    return lfilter(b, a, data)
+def wavelet_filter(audio, wavelet='db4', threshold_factor=0.5, max_levels=12):
+    max_level = pywt.dwt_max_level(len(audio), pywt.Wavelet(wavelet).dec_len)
+    # Limita o número de níveis de decomposição
+    max_level = min(max_level, max_levels)
+    coeffs = pywt.wavedec(audio, wavelet, level=max_level)
 
-def lowpass_filter(data, cutoff, fs):
-    return butter_filter(data, cutoff, fs, btype='low')
+    # Calcula o limiar de threshold (ajustado para ser mais agressivo)
+    threshold = np.median(np.abs(coeffs[-5])) / threshold_factor
+    filtered_coeffs = [pywt.threshold(
+        c, threshold, mode='soft') for c in coeffs]
 
-def highpass_filter(data, cutoff, fs):
-    return butter_filter(data, cutoff, fs, btype='high')
+    # Reconstrução do áudio filtrado
+    filtered_audio = pywt.waverec(filtered_coeffs, wavelet)
 
-def bandpass_filter(data, lowcut, highcut, fs):
-    nyquist = 0.5 * fs
-    low = lowcut / nyquist
-    high = highcut / nyquist
-    b, a = butter(5, [low, high], btype='band')
-    return lfilter(b, a, data)
+    # Garante que o áudio reconstruído esteja dentro do intervalo [-1, 1]
+    return np.clip(filtered_audio, -1, 1)
 
-def bandstop_filter(data, lowcut, highcut, fs):
-    nyquist = 0.5 * fs
-    low = lowcut / nyquist
-    high = highcut / nyquist
-    b, a = butter(5, [low, high], btype='bandstop')
-    return lfilter(b, a, data)
+# Função para salvar o áudio filtrado em arquivo
 
-# Filtros adicionais
 
-def equalize(data, factor):
-    return data * factor
+def save_audio(file_path, rate, audio):
+    audio = (audio * 32767).astype(np.int16)
+    wav.write(file_path, rate, audio)
 
-def smooth(data, window_length):
-    return savgol_filter(data, window_length, polyorder=2)
+# Função para tocar o áudio com pygame
 
-def add_reverb(data, decay):
-    reverb = np.convolve(data, np.ones((decay,)) / decay, mode='full')[:len(data)]
-    return reverb
 
-def compress(data, threshold):
-    return np.clip(data, -threshold, threshold)
+def play_audio(audio, rate):
+    pygame.mixer.init(frequency=rate)
+    pygame.mixer.music.load(audio)
+    pygame.mixer.music.play()
 
-# Interface gráfica
-def main():
-    audio_dir = os.path.join(os.getcwd(), "audio")
-    audio_file = os.path.join(audio_dir, "audio.wav")
+# Função para abrir a janela de carregamento do arquivo
 
-    if not os.path.exists(audio_file):
-        sg.popup("Erro", "O arquivo de áudio 'audio.wav' não foi encontrado na pasta 'audio'.")
-        return
 
-    signal, sample_rate = load_audio(audio_file)
-    duration = len(signal) / sample_rate
-    time = np.linspace(0, duration, len(signal))
+def open_file():
+    file_path = filedialog.askopenfilename(filetypes=[("WAV files", "*.wav")])
+    if file_path:
+        try:
+            rate, audio = load_audio(file_path)
+            audio_data['original'] = (rate, audio)  # Salva o áudio original
+            messagebox.showinfo("Sucesso", "Áudio carregado com sucesso!")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao carregar o áudio: {str(e)}")
 
-    plot_signal(time, signal, title="Sinal Original")
+# Função para aplicar a transformada e salvar
 
-    layout = [
-        [sg.Text("Escolha um filtro para aplicar no áudio:")],
-        [sg.Button("Passa-Baixa"), sg.Button("Passa-Alta")],
-        [sg.Button("Passa-Banda"), sg.Button("Rejeita-Banda")],
-        [sg.Button("Equalizador"), sg.Button("Suavização")],
-        [sg.Button("Reverb"), sg.Button("Compressão")],
-        [sg.Button("Transformada de Fourier"), sg.Button("Sair")],
-    ]
 
-    window = sg.Window("Processamento de Áudio", layout)
+def apply_wavelet():
+    if 'original' in audio_data:
+        rate, audio = audio_data['original']
+        filtered_audio = wavelet_filter(
+            audio, threshold_factor=0.3, max_levels=12)  # Ajustes
 
-    while True:
-        event, _ = window.read()
+        # Salvar o áudio filtrado
+        save_audio('audio_filtrado.wav', rate, filtered_audio)
 
-        if event in (sg.WINDOW_CLOSED, "Sair"):
-            break
+        # Atualizar o áudio filtrado no dicionário
+        audio_data['filtered'] = (rate, filtered_audio)
+        messagebox.showinfo(
+            "Sucesso", "Áudio filtrado e salvo como 'audio_filtrado.wav'!")
+    else:
+        messagebox.showerror("Erro", "Carregue um arquivo de áudio primeiro.")
 
-        elif event == "Passa-Baixa":
-            cutoff = 1000
-            filtered_signal = lowpass_filter(signal, cutoff, sample_rate)
-            plot_signal(time, filtered_signal, "Filtro Passa-Baixa")
-            play_signal(filtered_signal, sample_rate)
+# Função para tocar o áudio original
 
-        elif event == "Passa-Alta":
-            cutoff = 1000
-            filtered_signal = highpass_filter(signal, cutoff, sample_rate)
-            plot_signal(time, filtered_signal, "Filtro Passa-Alta")
-            play_signal(filtered_signal, sample_rate)
 
-        elif event == "Passa-Banda":
-            lowcut, highcut = 500, 2000
-            filtered_signal = bandpass_filter(signal, lowcut, highcut, sample_rate)
-            plot_signal(time, filtered_signal, "Filtro Passa-Banda")
-            play_signal(filtered_signal, sample_rate)
+def play_original():
+    if 'original' in audio_data:
+        rate, audio = audio_data['original']
+        file_path = "original_audio.wav"
+        save_audio(file_path, rate, audio)
+        play_audio(file_path, rate)
+    else:
+        messagebox.showerror("Erro", "Carregue um arquivo de áudio primeiro.")
 
-        elif event == "Rejeita-Banda":
-            lowcut, highcut = 500, 2000
-            filtered_signal = bandstop_filter(signal, lowcut, highcut, sample_rate)
-            plot_signal(time, filtered_signal, "Filtro Rejeita-Banda")
-            play_signal(filtered_signal, sample_rate)
+# Função para tocar o áudio filtrado
 
-        elif event == "Equalizador":
-            factor = 1.5
-            filtered_signal = equalize(signal, factor)
-            plot_signal(time, filtered_signal, "Equalizador")
-            play_signal(filtered_signal, sample_rate)
 
-        elif event == "Suavização":
-            window_length = 101
-            filtered_signal = smooth(signal, window_length)
-            plot_signal(time, filtered_signal, "Suavização")
-            play_signal(filtered_signal, sample_rate)
+def play_filtered():
+    if 'filtered' in audio_data:
+        rate, audio = audio_data['filtered']
+        file_path = "audio_filtrado.wav"
+        save_audio(file_path, rate, audio)
+        play_audio(file_path, rate)
+    else:
+        messagebox.showerror("Erro", "Filtre o áudio primeiro.")
 
-        elif event == "Reverb":
-            decay = 2000
-            filtered_signal = add_reverb(signal, decay)
-            plot_signal(time, filtered_signal, "Reverb")
-            play_signal(filtered_signal, sample_rate)
 
-        elif event == "Compressão":
-            threshold = 0.1
-            filtered_signal = compress(signal, threshold)
-            plot_signal(time, filtered_signal, "Compressão")
-            play_signal(filtered_signal, sample_rate)
+# Dicionário para armazenar o áudio
+audio_data = {}
 
-        elif event == "Transformada de Fourier":
-            freq = np.fft.fftfreq(len(signal), 1 / sample_rate)
-            fft_values = np.abs(fft(signal))
-            plt.figure(figsize=(10, 5))
-            plt.plot(freq[:len(freq)//2], fft_values[:len(freq)//2])
-            plt.title("Transformada de Fourier")
-            plt.xlabel("Frequência (Hz)")
-            plt.ylabel("Amplitude")
-            plt.grid()
-            plt.show()
+# Configuração da interface gráfica
+root = tk.Tk()
+root.title("Filtragem de Áudio com Wavelet")
+root.geometry("400x300")
 
-    window.close()
+# Botões da interface
+btn_load = tk.Button(root, text="Carregar Áudio", command=open_file)
+btn_load.pack(pady=10)
 
-if __name__ == "__main__":
-    main()
+btn_apply = tk.Button(root, text="Aplicar Filtragem", command=apply_wavelet)
+btn_apply.pack(pady=10)
+
+btn_play_original = tk.Button(
+    root, text="Ouvir Áudio Original", command=play_original)
+btn_play_original.pack(pady=10)
+
+btn_play_filtered = tk.Button(
+    root, text="Ouvir Áudio Filtrado", command=play_filtered)
+btn_play_filtered.pack(pady=10)
+
+# Rodar a interface gráfica
+root.mainloop()

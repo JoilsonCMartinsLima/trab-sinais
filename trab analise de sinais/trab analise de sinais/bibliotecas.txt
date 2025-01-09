@@ -1,1 +1,1 @@
-pip install numpy scipy pydub matplotlib PySimpleGUI simpleaudio
+pip install numpy scipy PyWavelets pygame
